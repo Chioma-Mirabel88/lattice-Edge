@@ -4,6 +4,8 @@ from typing import List
 from pathlib import Path
 import json
 
+from app.audit import emit_event
+
 
 app = FastAPI(
     title="Lattice Control Plane",
@@ -161,13 +163,22 @@ def create_domain(request: DomainCreate):
     domains[hostname] = domain
     save_domains(domains)
 
+    emit_event(
+        event_type="DOMAIN_CREATED",
+        resource_type="domain",
+        resource_id=hostname,
+        domain=hostname,
+        details={
+            "hostname": hostname,
+        },
+    )
+
     return domain
 
 
 @app.delete("/domains/{hostname}")
 def delete_domain(hostname: str):
     domains = load_domains()
-
     domain = domains.get(hostname)
 
     if not domain:
@@ -177,8 +188,17 @@ def delete_domain(hostname: str):
         }
 
     del domains[hostname]
-
     save_domains(domains)
+
+    emit_event(
+        event_type="DOMAIN_DELETED",
+        resource_type="domain",
+        resource_id=hostname,
+        domain=hostname,
+        details={
+            "hostname": hostname,
+        },
+    )
 
     return {
         "message": "domain_deleted",
@@ -222,8 +242,19 @@ def create_origin(hostname: str, request: OriginCreate):
 
     domain.origins.append(origin)
     domains[hostname] = domain
-
     save_domains(domains)
+
+    emit_event(
+        event_type="ORIGIN_CREATED",
+        resource_type="origin",
+        resource_id=origin_name,
+        domain=hostname,
+        details={
+            "address": origin.address,
+            "port": origin.port,
+            "enabled": origin.enabled,
+        },
+    )
 
     return origin
 
@@ -283,6 +314,18 @@ def update_origin(
 
     save_domains(domains)
 
+    emit_event(
+        event_type="ORIGIN_UPDATED",
+        resource_type="origin",
+        resource_id=origin_name,
+        domain=hostname,
+        details={
+            "address": origin.address,
+            "port": origin.port,
+            "enabled": origin.enabled,
+        },
+    )
+
     return origin
 
 
@@ -313,6 +356,17 @@ def delete_origin(hostname: str, origin_name: str):
     domains[hostname] = domain
 
     save_domains(domains)
+
+    emit_event(
+        event_type="ORIGIN_DELETED",
+        resource_type="origin",
+        resource_id=origin_name,
+        domain=hostname,
+        details={
+            "hostname": hostname,
+            "origin": origin_name,
+        },
+    )
 
     return {
         "message": "origin_deleted",

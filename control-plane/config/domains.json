@@ -14,6 +14,12 @@
           "address": "lattice-test-web-b",
           "port": 80,
           "enabled": true
+        },
+        {
+          "name": "web-c",
+          "address": "lattice-test-web-c",
+          "port": 80,
+          "enabled": true
         }
       ]
     },
