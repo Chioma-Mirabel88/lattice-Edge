@@ -1,10 +1,49 @@
-from fastapi import FastAPI
-from pydantic import BaseModel
-from typing import List
-from pathlib import Path
 import json
+import logging
+import time
+import uuid
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import List
+
+from fastapi import FastAPI, Request
+from pydantic import BaseModel
 
 from app.audit import emit_event
+
+
+class JsonFormatter(logging.Formatter):
+    def format(self, record: logging.LogRecord) -> str:
+        event = {
+            "timestamp": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+            "level": record.levelname,
+            "service": "lattice-control-plane",
+            "event": getattr(record, "event", "application"),
+        }
+
+        for field in (
+            "request_id",
+            "method",
+            "path",
+            "status",
+            "duration_ms",
+        ):
+            value = getattr(record, field, None)
+            if value is not None:
+                event[field] = value
+
+        return json.dumps(event)
+
+
+logger = logging.getLogger("lattice-control-plane")
+logger.setLevel(logging.INFO)
+
+handler = logging.StreamHandler()
+handler.setFormatter(JsonFormatter())
+
+logger.handlers.clear()
+logger.addHandler(handler)
+logger.propagate = False
 
 
 app = FastAPI(
@@ -44,6 +83,50 @@ class OriginCreate(BaseModel):
     address: str
     port: int = 80
     enabled: bool = True
+
+
+@app.middleware("http")
+async def observability_middleware(request: Request, call_next):
+    request_id = request.headers.get("X-Request-ID") or str(uuid.uuid4())
+    start_time = time.perf_counter()
+
+    try:
+        response = await call_next(request)
+    except Exception:
+        duration_ms = round((time.perf_counter() - start_time) * 1000, 2)
+
+        logger.error(
+            "http_request_failed",
+            extra={
+                "event": "http_request",
+                "request_id": request_id,
+                "method": request.method,
+                "path": request.url.path,
+                "status": 500,
+                "duration_ms": duration_ms,
+            },
+            exc_info=True,
+        )
+
+        raise
+
+    duration_ms = round((time.perf_counter() - start_time) * 1000, 2)
+
+    response.headers["X-Request-ID"] = request_id
+
+    logger.info(
+        "http_request",
+        extra={
+            "event": "http_request",
+            "request_id": request_id,
+            "method": request.method,
+            "path": request.url.path,
+            "status": response.status_code,
+            "duration_ms": duration_ms,
+        },
+    )
+
+    return response
 
 
 def load_domains():
