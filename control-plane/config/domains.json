@@ -1,0 +1,32 @@
+{
+  "domains": {
+    "www.lattice.test": {
+      "hostname": "www.lattice.test",
+      "origins": [
+        {
+          "name": "web-a",
+          "address": "lattice-test-web-a",
+          "port": 80,
+          "enabled": true
+        },
+        {
+          "name": "web-b",
+          "address": "lattice-test-web-b",
+          "port": 80,
+          "enabled": true
+        }
+      ]
+    },
+    "api.lattice.test": {
+      "hostname": "api.lattice.test",
+      "origins": [
+        {
+          "name": "api-web-a",
+          "address": "lattice-test-web-a",
+          "port": 80,
+          "enabled": true
+        }
+      ]
+    }
+  }
+}

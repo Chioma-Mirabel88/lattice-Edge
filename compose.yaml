@@ -1,0 +1,129 @@
+services:
+
+  lattice-control-plane:
+    build:
+      context: ./control-plane
+    image: lattice-control-plane:1.0
+    container_name: lattice-control-plane
+    volumes:
+      - ./control-plane/config:/config
+      - lattice-health-state:/state
+    networks:
+      lattice-edge:
+    expose:
+      - "8000"
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  lattice-health-monitor:
+    build:
+      context: ./health/monitor
+    image: lattice-health-monitor:0.6
+    container_name: lattice-health-monitor
+    volumes:
+      - lattice-health-state:/state
+    networks:
+      lattice-edge:
+    depends_on:
+      lattice-control-plane:
+        condition: service_healthy
+
+  lattice-edge-configurator:
+    build:
+      context: ./edge-configurator
+    image: lattice-edge-configurator:0.8
+    container_name: lattice-edge-configurator
+    environment:
+      CONTROL_PLANE_URL: http://lattice-control-plane:8000
+      OUTPUT_FILE: /config/nginx.conf
+      INTERVAL: "5"
+    volumes:
+      - lattice-edge-config:/config
+    networks:
+      lattice-edge:
+    depends_on:
+      lattice-control-plane:
+        condition: service_healthy
+      lattice-health-monitor:
+        condition: service_started
+
+  lattice-edge:
+    build:
+      context: ./edge
+    image: lattice-edge:0.8
+    container_name: lattice-edge
+    ports:
+      - "8080:80"
+      - "8443:443"
+    volumes:
+      - ./edge/certs:/etc/nginx/certs:ro
+      - lattice-edge-config:/etc/nginx/generated
+    networks:
+      lattice-edge:
+    depends_on:
+      lattice-edge-configurator:
+        condition: service_started
+
+  lattice-test-web-a:
+    build:
+      context: ./test-apps/web
+    image: lattice-test-web:0.4-a
+    container_name: lattice-test-web-a
+    networks:
+      lattice-edge:
+
+  lattice-test-web-b:
+    build:
+      context: ./test-apps/web-b
+    image: lattice-test-web:0.5-b
+    container_name: lattice-test-web-b
+    networks:
+      lattice-edge:
+
+  lattice-dns-primary:
+    build:
+      context: ./dns/primary
+    image: lattice-dns-primary:0.2
+    container_name: lattice-dns-primary
+    networks:
+      lattice-dns:
+        ipv4_address: 172.25.0.2
+
+  lattice-dns-secondary:
+    build:
+      context: ./dns/secondary
+    image: lattice-dns-secondary:0.1
+    container_name: lattice-dns-secondary
+    networks:
+      lattice-dns:
+        ipv4_address: 172.25.0.3
+    depends_on:
+      lattice-dns-primary:
+        condition: service_started
+
+
+networks:
+  lattice-edge:
+    external: true
+    name: lattice-edge
+
+  lattice-dns:
+    external: true
+    name: lattice-dns
+
+volumes:
+  lattice-edge-config:
+    name: lattice-edge-config
+
+  lattice-health-state:
+    name: lattice-health-state

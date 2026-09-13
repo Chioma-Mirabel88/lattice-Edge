@@ -1,0 +1,17 @@
+$TTL 60
+
+@   IN  SOA ns1.lattice.test. admin.lattice.test. (
+        2026082902
+        3600
+        600
+        86400
+        60
+)
+
+@       IN  NS      ns1.lattice.test.
+
+ns1     IN  A       127.0.0.1
+@       IN  A       127.0.0.1
+www     IN  CNAME   lattice.test.
+api     IN  A       127.0.0.1
+edge    IN  A       127.0.0.1

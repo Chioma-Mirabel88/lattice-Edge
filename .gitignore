@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.py[cod]
+
+# Environment / secrets
+.env
+.env.*
+!.env.example
+
+# TLS private keys
+*.key
+*.pem
+
+# Local/runtime state
+*.state
+*.log
+
+# OS/editor files
+.DS_Store
+.vscode/
+.idea/
