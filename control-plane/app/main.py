@@ -7,9 +7,20 @@ from pathlib import Path
 from typing import List
 
 from fastapi import FastAPI, Request
+from fastapi.responses import Response
+from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from pydantic import BaseModel
 
 from app.audit import emit_event
+from app.metrics import (
+    DOMAINS_TOTAL,
+    ENABLED_ORIGINS_TOTAL,
+    HEALTHY_ORIGINS_TOTAL,
+    HTTP_REQUEST_DURATION,
+    HTTP_REQUESTS_TOTAL,
+    HTTP_RESPONSES_TOTAL,
+    ORIGINS_TOTAL,
+)
 
 
 class JsonFormatter(logging.Formatter):
@@ -93,7 +104,25 @@ async def observability_middleware(request: Request, call_next):
     try:
         response = await call_next(request)
     except Exception:
-        duration_ms = round((time.perf_counter() - start_time) * 1000, 2)
+        duration_seconds = time.perf_counter() - start_time
+        duration_ms = round(duration_seconds * 1000, 2)
+
+        if request.url.path != "/metrics":
+            HTTP_REQUESTS_TOTAL.labels(
+                method=request.method,
+                path=request.url.path,
+            ).inc()
+
+            HTTP_REQUEST_DURATION.labels(
+                method=request.method,
+                path=request.url.path,
+            ).observe(duration_seconds)
+
+            HTTP_RESPONSES_TOTAL.labels(
+                method=request.method,
+                path=request.url.path,
+                status="500",
+            ).inc()
 
         logger.error(
             "http_request_failed",
@@ -110,7 +139,25 @@ async def observability_middleware(request: Request, call_next):
 
         raise
 
-    duration_ms = round((time.perf_counter() - start_time) * 1000, 2)
+    duration_seconds = time.perf_counter() - start_time
+    duration_ms = round(duration_seconds * 1000, 2)
+
+    if request.url.path != "/metrics":
+        HTTP_REQUESTS_TOTAL.labels(
+            method=request.method,
+            path=request.url.path,
+        ).inc()
+
+        HTTP_REQUEST_DURATION.labels(
+            method=request.method,
+            path=request.url.path,
+        ).observe(duration_seconds)
+
+        HTTP_RESPONSES_TOTAL.labels(
+            method=request.method,
+            path=request.url.path,
+            status=str(response.status_code),
+        ).inc()
 
     response.headers["X-Request-ID"] = request_id
 
@@ -213,6 +260,38 @@ def health():
     return {
         "status": "healthy",
     }
+
+
+@app.get("/metrics")
+def metrics():
+    domains = load_domains()
+
+    total_domains = len(domains)
+    total_origins = 0
+    enabled_origins = 0
+    healthy_origins = 0
+
+    health = read_health_state()
+
+    for domain in domains.values():
+        for origin in domain.origins:
+            total_origins += 1
+
+            if origin.enabled:
+                enabled_origins += 1
+
+            if health.get(origin.name) == "HEALTHY":
+                healthy_origins += 1
+
+    DOMAINS_TOTAL.set(total_domains)
+    ORIGINS_TOTAL.set(total_origins)
+    ENABLED_ORIGINS_TOTAL.set(enabled_origins)
+    HEALTHY_ORIGINS_TOTAL.set(healthy_origins)
+
+    return Response(
+        content=generate_latest(),
+        media_type=CONTENT_TYPE_LATEST,
+    )
 
 
 @app.get("/domains")
