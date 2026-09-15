@@ -1,7 +1,9 @@
+import asyncio
 import json
 import logging
 import time
 import uuid
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import List
@@ -57,7 +59,31 @@ logger.addHandler(handler)
 logger.propagate = False
 
 
+HEARTBEAT_TIMEOUT_SECONDS = 30
+LIFECYCLE_CHECK_INTERVAL_SECONDS = 5
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    async def lifecycle_loop():
+        while True:
+            await check_edge_node_lifecycle()
+            await asyncio.sleep(LIFECYCLE_CHECK_INTERVAL_SECONDS)
+
+    lifecycle_task = asyncio.create_task(lifecycle_loop())
+
+    try:
+        yield
+    finally:
+        lifecycle_task.cancel()
+        try:
+            await lifecycle_task
+        except asyncio.CancelledError:
+            pass
+
+
 app = FastAPI(
+    lifespan=lifespan,
     title="Lattice Control Plane",
     version="0.4.0",
 )
@@ -65,6 +91,7 @@ app = FastAPI(
 
 HEALTH_STATE_FILE = Path("/state/origins.state")
 CONFIG_FILE = Path("/config/domains.json")
+EDGE_NODES_FILE = Path("/config/edge-nodes.json")
 
 
 class Origin(BaseModel):
@@ -94,6 +121,26 @@ class OriginCreate(BaseModel):
     address: str
     port: int = 80
     enabled: bool = True
+
+
+class EdgeNode(BaseModel):
+    node_id: str
+    name: str
+    status: str
+    runtime: str
+    config_version: int
+    registered_at: str
+    last_heartbeat: str | None = None
+
+
+class EdgeNodeRegister(BaseModel):
+    node_id: str
+    name: str
+    runtime: str
+
+
+class EdgeNodeHeartbeat(BaseModel):
+    config_version: int
 
 
 @app.middleware("http")
@@ -205,6 +252,76 @@ def save_domains(domains):
         json.dump(data, file, indent=2)
 
     temp_file.replace(CONFIG_FILE)
+
+
+def load_edge_nodes():
+    if not EDGE_NODES_FILE.exists():
+        return {}
+
+    with EDGE_NODES_FILE.open("r") as file:
+        data = json.load(file)
+
+    return {
+        node_id: EdgeNode(**node)
+        for node_id, node in data.get("edge_nodes", {}).items()
+    }
+
+
+def save_edge_nodes(edge_nodes):
+    EDGE_NODES_FILE.parent.mkdir(parents=True, exist_ok=True)
+
+    data = {
+        "edge_nodes": {
+            node_id: node.model_dump()
+            for node_id, node in edge_nodes.items()
+        }
+    }
+
+    temp_file = EDGE_NODES_FILE.with_suffix(".tmp")
+
+    with temp_file.open("w") as file:
+        json.dump(data, file, indent=2)
+
+    temp_file.replace(EDGE_NODES_FILE)
+
+
+async def check_edge_node_lifecycle():
+    edge_nodes = load_edge_nodes()
+    now = datetime.now(timezone.utc)
+
+    changed = False
+
+    for node in edge_nodes.values():
+        if not node.last_heartbeat:
+            continue
+
+        last_heartbeat = datetime.fromisoformat(
+            node.last_heartbeat.replace("Z", "+00:00")
+        )
+
+        heartbeat_age = (now - last_heartbeat).total_seconds()
+
+        if (
+            node.status == "active"
+            and heartbeat_age > HEARTBEAT_TIMEOUT_SECONDS
+        ):
+            node.status = "offline"
+
+            emit_event(
+                event_type="EDGE_NODE_OFFLINE",
+                resource_type="edge_node",
+                resource_id=node.node_id,
+                status="warning",
+                details={
+                    "last_heartbeat": node.last_heartbeat,
+                    "heartbeat_age_seconds": round(heartbeat_age, 2),
+                },
+            )
+
+            changed = True
+
+    if changed:
+        save_edge_nodes(edge_nodes)
 
 
 def read_health_state():
@@ -601,3 +718,112 @@ def edge_config(hostname: str):
             for origin in eligible
         ],
     }
+
+
+@app.post("/edge-nodes/register", status_code=201)
+def register_edge_node(request: EdgeNodeRegister):
+    edge_nodes = load_edge_nodes()
+
+    node_id = request.node_id.strip()
+    name = request.name.strip()
+    runtime = request.runtime.strip()
+
+    if not node_id:
+        return {
+            "error": "invalid_node_id",
+            "message": "Node ID cannot be empty",
+        }
+
+    if not name:
+        return {
+            "error": "invalid_node_name",
+            "message": "Node name cannot be empty",
+        }
+
+    if not runtime:
+        return {
+            "error": "invalid_runtime",
+            "message": "Runtime cannot be empty",
+        }
+
+    if node_id in edge_nodes:
+        return {
+            "error": "edge_node_exists",
+            "node_id": node_id,
+        }
+
+    now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+    node = EdgeNode(
+        node_id=node_id,
+        name=name,
+        status="registered",
+        runtime=runtime,
+        config_version=0,
+        registered_at=now,
+        last_heartbeat=now,
+    )
+
+    edge_nodes[node_id] = node
+    save_edge_nodes(edge_nodes)
+
+    emit_event(
+        event_type="EDGE_NODE_REGISTERED",
+        resource_type="edge_node",
+        resource_id=node_id,
+        details={
+            "name": name,
+            "runtime": runtime,
+        },
+    )
+
+    return node
+
+
+@app.get("/edge-nodes")
+def get_edge_nodes():
+    edge_nodes = load_edge_nodes()
+
+    return {
+        "edge_nodes": list(edge_nodes.values()),
+    }
+
+
+@app.post("/edge-nodes/{node_id}/heartbeat")
+def edge_node_heartbeat(
+    node_id: str,
+    request: EdgeNodeHeartbeat,
+):
+    edge_nodes = load_edge_nodes()
+
+    node = edge_nodes.get(node_id)
+
+    if not node:
+        return {
+            "error": "edge_node_not_found",
+            "node_id": node_id,
+        }
+
+    now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+    previous_status = node.status
+
+    node.status = "active"
+    node.config_version = request.config_version
+    node.last_heartbeat = now
+
+    if previous_status == "offline":
+        emit_event(
+            event_type="EDGE_NODE_RECONNECTED",
+            resource_type="edge_node",
+            resource_id=node_id,
+            details={
+                "previous_status": previous_status,
+                "config_version": request.config_version,
+            },
+        )
+
+    edge_nodes[node_id] = node
+    save_edge_nodes(edge_nodes)
+
+    return node

@@ -10,8 +10,8 @@ services:
       - lattice-health-state:/state
     networks:
       lattice-edge:
-    expose:
-      - "8000"
+    ports:
+      - "8000:8000"
     healthcheck:
       test:
         [
